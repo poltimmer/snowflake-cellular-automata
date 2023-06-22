@@ -1,0 +1,17 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+numpy = "*"
+scipy = "*"
+matplotlib = "==3.6.3"
+tqdm = "*"
+jupyter = "*"
+pycuda = "*"
+numba = "*"
+pyyaml = "*"
+
+[requires]
+python_version = "3.9"
