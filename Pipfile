@@ -4,7 +4,7 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-numpy = "*"
+numpy = "==1.24.3"
 scipy = "*"
 matplotlib = "==3.6.3"
 tqdm = "*"
@@ -12,6 +12,7 @@ jupyter = "*"
 pycuda = "*"
 numba = "*"
 pyyaml = "*"
+h5py = "*"
 
 [requires]
 python_version = "3.9"
