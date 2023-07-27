@@ -2,10 +2,22 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import affine_transform
+import hashlib
 
 sheer_30_degrees = np.matrix([[1, 0, 0], [0.5, 1, 0], [0, 0, 1]])
 squash = np.matrix([[2 / (3 ** 0.5), 0, 0], [0, 1, 0], [0, 0, 1]])
 
+def get_flake_filename(rho, kappa, mu, gamma, alpha, beta, theta):
+    """
+    Generate a short, deterministic filename based on the parameters of the snowflake.
+    """
+    # Concatenate parameters into a single string
+    params_str = f"{rho}-{kappa}-{mu}-{gamma}-{alpha}-{beta}-{theta}"
+    # Create a SHA-256 hash of the string
+    params_hash = hashlib.sha256(params_str.encode()).hexdigest()
+    # Use the first 10 characters of the hash for the filename
+    filename = f"flake_{params_hash[:10]}.hdf5"
+    return filename
 
 def get_image(snowflake):
     if len(snowflake.shape) == 3:
