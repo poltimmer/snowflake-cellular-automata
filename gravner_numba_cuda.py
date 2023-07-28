@@ -11,12 +11,14 @@ from numba import types
 
 # logger = logging.getLogger('numba')
 # logger.setLevel(logging.DEBUG)
+simulate_quadrant = True
+save_flakes = False
 
 # n_steps = 15439
 n_steps = 1000
 n_plots = 20
 n_saves = 100
-flake_size = 101
+flake_size = 51
 batch_size = 64
 
 rho = 0.5985382874
@@ -44,7 +46,17 @@ def get_neighbors(col, row, neighbors):
     offsets = cuda.const.array_like(off)  # todo: see if this impacts performance
     # Apply the offsets to the given coordinates
     for i in range(6):
-        neighbors[i] = col + offsets[i, 0], row + offsets[i, 1]
+        col_offset, row_offset = offsets[i]
+        if simulate_quadrant:
+            if col == 0:
+                if col_offset == -1:
+                    col_offset = 1
+                    row_offset += 1
+            if row == 0:
+                if row_offset == -1:
+                    row_offset = 1
+                    col_offset += 1
+        neighbors[i] = col + col_offset, row + row_offset
 
 
 @cuda.jit(device=True)
@@ -158,7 +170,9 @@ def update(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 
     col, row, flake_idx = cuda.grid(3)
 
     # Check if the cell is within the flake grid boundaries and is not frozen
-    if 0 < col < flake_size - 1 and 0 < row < flake_size - 1 and flake[flake_idx, col, row, 0] != 1:
+    if flake[flake_idx, col, row, 0] != 1 and (
+            (simulate_quadrant and 0 <= col < flake_size - 1 and 0 <= row < flake_size - 1) or
+            (not simulate_quadrant and 0 < col < flake_size - 1 and 0 < row < flake_size - 1)):
         if step == 0:
             diffusion(flake_idx, col, row, flake, new_flake)
         elif step == 1:
@@ -173,9 +187,14 @@ def main():
     flake = np.zeros((batch_size, flake_size, flake_size, 4)).astype(np.float32)
     flake[:, :, :, 3].fill(rho)
 
-    flake[:, flake_size // 2, flake_size // 2, 0] = 1
-    flake[:, flake_size // 2, flake_size // 2, 2] = 1
-    flake[:, flake_size // 2, flake_size // 2, 3] = 0
+    if simulate_quadrant:
+        flake[:, 0, 0, 0] = 1
+        flake[:, 0, 0, 2] = 1
+        flake[:, 0, 0, 3] = 0
+    else:
+        flake[:, flake_size // 2, flake_size // 2, 0] = 1
+        flake[:, flake_size // 2, flake_size // 2, 2] = 1
+        flake[:, flake_size // 2, flake_size // 2, 3] = 0
 
     new_flake = flake.copy()
 
@@ -195,7 +214,10 @@ def main():
     buffer = []
 
     # Open HDF5 file for writing
-    with h5py.File(filename, 'w') as h5_file:
+    h5_file = None
+    dset = None
+    if save_flakes:
+        h5_file = h5py.File(filename, 'w')
         # Write simulation parameters as file-level attributes
         h5_file.attrs['rho'] = rho
         h5_file.attrs['kappa'] = kappa
@@ -207,21 +229,22 @@ def main():
 
         dset = h5_file.create_dataset('flakes', shape=(n_steps,) + flake.shape, dtype=np.float32)
 
-        for i in tqdm(range(n_steps)):
-            update[blockspergrid, threadsperblock](flake_device, new_flake_device, 0)
-            flake_device[:] = new_flake_device
-            update[blockspergrid, threadsperblock](flake_device, new_flake_device, 1)
-            flake_device[:] = new_flake_device
-            update[blockspergrid, threadsperblock](flake_device, new_flake_device, 2)
-            flake_device[:] = new_flake_device
-            update[blockspergrid, threadsperblock](flake_device, new_flake_device, 3)
-            flake_device[:] = new_flake_device
+    for i in tqdm(range(n_steps)):
+        update[blockspergrid, threadsperblock](flake_device, new_flake_device, 0)
+        flake_device[:] = new_flake_device
+        update[blockspergrid, threadsperblock](flake_device, new_flake_device, 1)
+        flake_device[:] = new_flake_device
+        update[blockspergrid, threadsperblock](flake_device, new_flake_device, 2)
+        flake_device[:] = new_flake_device
+        update[blockspergrid, threadsperblock](flake_device, new_flake_device, 3)
+        flake_device[:] = new_flake_device
 
-            if i % (n_steps // n_plots) == n_steps // n_plots - 1:
-                flake_device.copy_to_host(flake)
-                # flake_crop = flake[:, flake_size // 2:, flake_size // 2:, :]
-                plot_flake_masses(flake[0])
+        if i % (n_steps // n_plots) == n_steps // n_plots - 1:
+            flake_device.copy_to_host(flake)
+            # flake_crop = flake[:, flake_size // 2:, flake_size // 2:, :]
+            plot_flake_masses(flake[0])
 
+        if save_flakes:
             save_flake_to_hdf5(flake, flake_device, i, h5_file)
             # flake_device.copy_to_host(flake)
             # buffer.append(flake.copy())
@@ -232,11 +255,16 @@ def main():
     flake_device.copy_to_host(flake)
     render(np.array(flake.copy().tolist())[0])
 
+    if save_flakes:
+        h5_file.close()
+
+
 def save_buffer_to_hdf5(dset, buffer, i):
     # Write the buffer to the correct position in the dataset
     # The start index is the current step minus the buffer length plus one
     start = i - len(buffer) + 1
     dset[start:start + len(buffer)] = buffer
+
 
 def save_flake_to_hdf5(flake, flake_device, step, h5_file, hash_function='sha256'):
     # Copy data from device to host
