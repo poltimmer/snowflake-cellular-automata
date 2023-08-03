@@ -66,14 +66,14 @@ def render(snowflake, size=12):
 def plot_flake_masses(flake):
     fig, axs = plt.subplots(ncols=2, nrows=2, sharey=True, figsize=(10, 10))
     # select only the top-right quadrant of the flake
-    axs[0, 0].imshow(flake[:, :, 3], origin='lower', clim=(0.0, 1.0))
+    axs[0, 0].imshow(flake[:, :, 0], origin='lower', clim=(0.0, 1.0))
     axs[0, 1].imshow(flake[:, :, 1], origin='lower', clim=(0.0, 1.0))
     axs[1, 0].imshow(flake[:, :, 2], origin='lower', clim=(0.0, 1.0))
-    i = axs[1, 1].imshow(flake[:, :, 0], origin='lower', clim=(0.0, 1.0))
-    axs[0, 0].set_title("Vapour")
+    i = axs[1, 1].imshow(flake[:, :, 3], origin='lower', clim=(0.0, 1.0))
+    axs[0, 0].set_title("Attachment")
     axs[0, 1].set_title("Boundary mass")
     axs[1, 0].set_title("Ice")
-    axs[1, 1].set_title("Attachment")
+    axs[1, 1].set_title("Vapour")
     cb = fig.colorbar(i, ax=axs)
     plt.show()
 

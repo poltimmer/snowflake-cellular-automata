@@ -7,7 +7,7 @@ from pycuda import gpuarray
 from pycuda.compiler import SourceModule
 from tqdm import tqdm
 
-from utils import render, plot_flake_masses
+from utils.plotting import render, plot_flake_masses
 
 n_steps = 15439
 n_plots = 20

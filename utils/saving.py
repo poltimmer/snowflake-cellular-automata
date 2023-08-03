@@ -14,15 +14,11 @@ def save_flake_to_hdf5(flake: np.ndarray, flake_device: DeviceNDArray, step: int
     # Copy data from device to host
     flake_device.copy_to_host(flake)
 
+    dt = np.dtype([('ice', np.float32), ('attachment', np.bool_)])
+    data = np.zeros((flake.shape[0], flake.shape[1]), dtype=dt)
+    data['ice'] = flake[:, :, 2]
+    data['attachment'] = flake[:, :, 0].astype(np.bool_)
+
     # Create a dataset for this step
-    dataset = h5_file.create_dataset(f'step_{step}', data=flake)
+    dataset = h5_file.create_dataset(f'step_{step}', data=data, compression='gzip', compression_opts=9)
     dataset.attrs['step'] = step
-
-    # # Compute the hash of the first layer of the flake
-    # flake_layer_hash = hashlib.new(hash_function)
-    # flake_layer_hash.update(flake[:, :, 0].tobytes())
-    # dataset.attrs['flake_layer_hash'] = flake_layer_hash.hexdigest()
-
-    # Compute the size of the crystal (modify this as needed)
-    crystal_size = np.sum(flake[:, :, 3])
-    dataset.attrs['crystal_size'] = crystal_size
