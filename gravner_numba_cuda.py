@@ -1,10 +1,12 @@
 import math
 import os
+from random import random, seed
 
 import h5py
 import numpy as np
-from numba import cuda, int32, float32, boolean
+from numba import cuda, int32, float32, boolean, uint64
 from numba import types
+from numba.cuda.random import xoroshiro128p_uniform_float32, create_xoroshiro128p_states
 from tqdm import tqdm
 
 from utils.loading import load
@@ -12,18 +14,18 @@ from utils.params import ParamArray, ParamToIdx
 from utils.plotting import render, plot_flake_masses, get_flake_filename
 from utils.saving import save_flake_to_hdf5
 
-# logger = logging.getLogger('numba')
-# logger.setLevel(logging.DEBUG)
-simulate_quadrant = True
+quadrant_only_simulation = True
 save_flakes = True
 save_dir = 'data/flakes'
 
-# n_steps = 15439
-n_steps = 1000
+max_steps = 5000
+plot = False
 n_plots = 10
-n_saves = 100
 flake_size = 64
-batch_size = 128
+flake_stop_margin = 5
+batch_size = 256
+
+sigma = 5e-5
 
 params: np.array
 
@@ -37,7 +39,7 @@ def get_neighbors(col, row, neighbors):
     # Apply the offsets to the given coordinates
     for i in range(6):
         col_offset, row_offset = offsets[i]
-        if simulate_quadrant:
+        if quadrant_only_simulation:
             if col == 0:
                 if col_offset == -1:
                     col_offset = 1
@@ -50,9 +52,10 @@ def get_neighbors(col, row, neighbors):
 
 
 @cuda.jit
-def diffusion(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A')):
+def diffusion(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A'),
+              flake_stop: types.Array(boolean, 1, 'A')):
     col, row, flake_idx = cuda.grid(3)
-    if not is_live_cell(flake_idx, col, row, flake):
+    if not is_live_cell(flake_idx, col, row, flake, flake_stop):
         return
 
     # Create a list to store neighbor coordinates
@@ -77,13 +80,14 @@ def diffusion(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float3
 
 
 @cuda.jit
-def freezing(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A')):
+def freezing(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A'),
+             flake_stop: types.Array(boolean, 1, 'A')):
     """
     Freezing rule:
     If a cell is unfrozen and has a frozen neighbor, it freezes with probability kappa.
     """
     col, row, flake_idx = cuda.grid(3)
-    if not is_live_cell(flake_idx, col, row, flake):
+    if not is_live_cell(flake_idx, col, row, flake, flake_stop):
         return
 
     neighbors = cuda.local.array((6, 2), int32)
@@ -106,12 +110,13 @@ def freezing(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32
 
 
 @cuda.jit
-def attachment(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A'), flake_changed: types.Array(boolean, 1, 'A')):
+def attachment(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A'),
+               flake_changed: types.Array(boolean, 1, 'A'), flake_stop: types.Array(boolean, 1, 'A')):
     """
     Perform attachment of diffusive mass to crystal and boundary mass, based on number of frozen neighbors.
     """
     col, row, flake_idx = cuda.grid(3)
-    if not is_live_cell(flake_idx, col, row, flake):
+    if not is_live_cell(flake_idx, col, row, flake, flake_stop):
         return
 
     neighbors = cuda.local.array((6, 2), int32)
@@ -148,15 +153,18 @@ def attachment(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float
         new_flake[flake_idx, col, row, 1] = 0
         new_flake[flake_idx, col, row, 2] = crystal_mass
         flake_changed[flake_idx] = True
+        if col == flake_size - flake_stop_margin:
+            flake_stop[flake_idx] = True
 
 
 @cuda.jit
-def melting(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A')):
+def melting(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A'),
+            flake_stop: types.Array(boolean, 1, 'A')):
     """
     Perform melting of boundary mass and crystal mass to diffusive mass.
     """
     col, row, flake_idx = cuda.grid(3)
-    if not is_live_cell(flake_idx, col, row, flake):
+    if not is_live_cell(flake_idx, col, row, flake, flake_stop):
         return
 
     boundary_mass = flake[flake_idx, col, row, 1]
@@ -171,14 +179,38 @@ def melting(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32,
         new_flake[flake_idx, col, row, 2] -= boundary_mass * params[flake_idx, ParamToIdx.GAMMA.value]
 
 
+@cuda.jit
+def noise(flake: types.Array(float32, 4, 'A'), new_flake: types.Array(float32, 4, 'A'),
+          flake_stop: types.Array(boolean, 1, 'A'), rng_states: types.Array(uint64, 1, 'A')):
+    """
+    Perform noise addition to diffusive mass.
+    Noise is added by adding or subtracting sigma * diffusive_mass, where the sign is chosen randomly with equal
+    probability.
+    This kernel is deterministic based on the random seed.
+    """
+    col, row, flake_idx = cuda.grid(3)
+    if not is_live_cell(flake_idx, col, row, flake, flake_stop):
+        return
+
+    diffusive_mass = flake[flake_idx, col, row, 3]
+    if diffusive_mass != 0:
+        # Generate a random float and check if it's greater than 0.5
+        random_value = xoroshiro128p_uniform_float32(rng_states,
+                                                     flake_idx * flake.shape[1] * flake.shape[2] +
+                                                     col * flake.shape[2] + row)
+        sign = 1 if random_value > 0.5 else -1
+        new_flake[flake_idx, col, row, 3] += diffusive_mass * sigma * sign
+
+
 @cuda.jit(device=True)
-def is_live_cell(flake_idx: int32, col: int32, row: int32, flake: types.Array(float32, 4, 'A')) -> boolean:
+def is_live_cell(flake_idx: int32, col: int32, row: int32, flake: types.Array(float32, 4, 'A'),
+                 flake_stop: types.Array(boolean, 1, 'A')) -> boolean:
     """
     Check if the cell is within the flake grid boundaries and is not frozen.
     """
-    return flake[flake_idx, col, row, 0] != 1 and (
-            (simulate_quadrant and 0 <= col < flake_size - 1 and 0 <= row < flake_size - 1) or
-            (not simulate_quadrant and 0 < col < flake_size - 1 and 0 < row < flake_size - 1))
+    return not flake_stop[flake_idx] and flake[flake_idx, col, row, 0] != 1 and (
+            (quadrant_only_simulation and 0 <= col < flake_size - 1 and 0 <= row < flake_size - 1) or
+            (not quadrant_only_simulation and 0 < col < flake_size - 1 and 0 < row < flake_size - 1))
 
 
 def simulate():
@@ -187,7 +219,7 @@ def simulate():
     rho_reshaped = rho_array.reshape((-1, 1, 1))
     flake[:, :, :, 3] = rho_reshaped
 
-    if simulate_quadrant:
+    if quadrant_only_simulation:
         flake[:, 0, 0, 0] = 1
         flake[:, 0, 0, 2] = 1
         flake[:, 0, 0, 3] = 0
@@ -203,7 +235,7 @@ def simulate():
     flake_device = cuda.to_device(flake)
     new_flake_device = cuda.to_device(new_flake)
 
-    threadsperblock = (16, 16, 1)
+    threadsperblock = (16, 16, 4)
     blockspergrid_x = math.ceil(flake_size / threadsperblock[0])
     blockspergrid_y = math.ceil(flake_size / threadsperblock[1])
     blockspergrid_z = math.ceil(batch_size / threadsperblock[2])
@@ -231,20 +263,34 @@ def simulate():
     flake_changed = np.zeros((batch_size,)).astype(np.bool_)
     zero_array_device = cuda.to_device(flake_changed)
     flake_changed_device = cuda.to_device(flake_changed)
+    flake_stop = np.zeros((batch_size,)).astype(np.bool_)
+    flake_stop_device = cuda.to_device(flake_stop)
 
-    for step in tqdm(range(n_steps)):
-        diffusion[blockspergrid, threadsperblock](flake_device, new_flake_device)
-        flake_device[:] = new_flake_device
-        freezing[blockspergrid, threadsperblock](flake_device, new_flake_device)
-        flake_device[:] = new_flake_device
-        attachment[blockspergrid, threadsperblock](flake_device, new_flake_device, flake_changed_device)
-        flake_device[:] = new_flake_device
-        melting[blockspergrid, threadsperblock](flake_device, new_flake_device)
-        flake_device[:] = new_flake_device
+    rng_states: types.Array(uint64, 1, 'A') = None
 
-        if step % (n_steps // n_plots) == n_steps // n_plots - 1:
+    if sigma > 0:
+        rng_states = create_xoroshiro128p_states(threadsperblock[0] * threadsperblock[1] * threadsperblock[
+            2] * blockspergrid_x * blockspergrid_y * blockspergrid_z, seed=1)
+
+    for step in tqdm(range(max_steps), desc="Simulation steps", leave=False):
+        diffusion[blockspergrid, threadsperblock](flake_device, new_flake_device, flake_stop_device)
+        flake_device[:] = new_flake_device
+        freezing[blockspergrid, threadsperblock](flake_device, new_flake_device, flake_stop_device)
+        flake_device[:] = new_flake_device
+        attachment[blockspergrid, threadsperblock](flake_device, new_flake_device, flake_changed_device,
+                                                   flake_stop_device)
+        flake_device[:] = new_flake_device
+        melting[blockspergrid, threadsperblock](flake_device, new_flake_device, flake_stop_device)
+        flake_device[:] = new_flake_device
+        if np.all(flake_stop_device):
+            print(f"Stopped at step {step}")
+            break
+        if sigma > 0:
+            noise[blockspergrid, threadsperblock](flake_device, new_flake_device, flake_stop_device, rng_states)
+            flake_device[:] = new_flake_device
+
+        if plot and step % (max_steps // n_plots) == max_steps // n_plots - 1:
             flake_device.copy_to_host(flake)
-            # flake_crop = flake[:, flake_size // 2:, flake_size // 2:, :]
             plot_flake_masses(flake[0])
 
         for (idx,) in np.argwhere(flake_changed_device):
@@ -253,23 +299,29 @@ def simulate():
 
         flake_changed_device[:] = zero_array_device
     flake_device.copy_to_host(flake)
-    render(np.array(flake.copy().tolist())[0])
+    if plot:
+        render(np.array(flake.copy().tolist())[0])
 
     if save_flakes:
         for i in range(batch_size):
-            h5_files[i].create_dataset('flake_final', data=flake[i])
+            h5_files[i].create_dataset('flake_final', data=flake[i], compression='gzip', compression_opts=9)
+            # h5_files[i].create_dataset('rng_states_final', data=rng_states, compression='gzip', compression_opts=9)
             h5_files[i].close()
 
 
 def main():
     data_array = load()
-    param_list = ParamArray(data_array, batch_size=batch_size)
+    seed(1)
+    np.random.seed(1)
+    param_list = ParamArray(data_array, batch_size=batch_size, randomize=True)
     global params
-    for i, batch in enumerate(param_list):
-        params = batch
-        simulate()
-        if i == 1:
-            break
+    with tqdm(total=len(param_list)) as pbar:
+        for batch in param_list:
+            if len(batch) < batch_size:
+                break
+            params = batch
+            simulate()
+            pbar.update(len(batch))
 
 
 if __name__ == "__main__":
