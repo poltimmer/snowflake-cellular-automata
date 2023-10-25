@@ -250,13 +250,13 @@ def simulate():
             filename = get_flake_filename(*params[i, :])
             h5_file = h5py.File(f"./{save_dir}/{filename}.h5", 'w')
             # Write simulation parameters as file-level attributes
-            h5_file.attrs['rho'] = params[0, ParamToIdx.RHO.value]
-            h5_file.attrs['kappa'] = params[0, ParamToIdx.KAPPA.value]
-            h5_file.attrs['mu'] = params[0, ParamToIdx.MU.value]
-            h5_file.attrs['gamma'] = params[0, ParamToIdx.GAMMA.value]
-            h5_file.attrs['alpha'] = params[0, ParamToIdx.ALPHA.value]
-            h5_file.attrs['beta'] = params[0, ParamToIdx.BETA.value]
-            h5_file.attrs['theta'] = params[0, ParamToIdx.THETA.value]
+            h5_file.attrs['rho'] = params[i, ParamToIdx.RHO.value]
+            h5_file.attrs['kappa'] = params[i, ParamToIdx.KAPPA.value]
+            h5_file.attrs['mu'] = params[i, ParamToIdx.MU.value]
+            h5_file.attrs['gamma'] = params[i, ParamToIdx.GAMMA.value]
+            h5_file.attrs['alpha'] = params[i, ParamToIdx.ALPHA.value]
+            h5_file.attrs['beta'] = params[i, ParamToIdx.BETA.value]
+            h5_file.attrs['theta'] = params[i, ParamToIdx.THETA.value]
             h5_files.append(h5_file)
 
     flake_sum = np.empty_like(flake_device[:, :, :, 0])
