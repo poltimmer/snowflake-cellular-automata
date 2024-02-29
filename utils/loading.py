@@ -31,9 +31,13 @@ def load():
                 value = value[0]
             params.append(float(value))
         data_list.append(params)
-
-    # Convert data list to numpy array
     return np.array(data_list)
+    #     data_list.append((flake['params']['j'][0], params))
+    #
+    # data_list.sort(key=lambda x: x[0], reverse=True)
+    #
+    # # Convert data list to numpy array
+    # return np.array([x[1] for x in data_list])
 
 
 if __name__ == "__main__":

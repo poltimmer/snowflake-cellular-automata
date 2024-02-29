@@ -10,7 +10,7 @@ def save_buffer_to_hdf5(dset, buffer, i):
     dset[start:start + len(buffer)] = buffer
 
 
-def save_flake_to_hdf5(flake: np.ndarray, flake_device: DeviceNDArray, step: int, h5_file: File, hash_function='sha256'):
+def save_flake_to_hdf5(flake: np.ndarray, flake_device: DeviceNDArray, step: int, h5_file: File):
     # Copy data from device to host
     flake_device.copy_to_host(flake)
 

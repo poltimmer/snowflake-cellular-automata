@@ -6,7 +6,7 @@ import numpy as np
 
 
 class ParamList:
-    def __init__(self, data_dict, batch_size=1):
+    def __init__(self, data_dict, batch_size=1, randomize=False, n_repeat=1):
         self.param_keys = ['n', 'a', 'r', 'm', 'x', 's', 'j', 'y', 'k', 'g', 'b', 'z', 'i', 't']
         self.param_name_dict = {
             'r': 'rho',
@@ -19,31 +19,41 @@ class ParamList:
         }
         self.data_dict = data_dict
         self.batch_size = batch_size
+        self.n_repeat = n_repeat
+        # sort by data_dict['flakes']['params']['j'][0]
+        if randomize:
+            np.random.shuffle(self.data_dict['flakes'])
+        else:
+            self.data_dict['flakes'].sort(key=lambda x: x['params']['j'][0], reverse=True)
 
     def __len__(self):
-        return len(self.data_dict['flakes'])
+        return len(self.data_dict['flakes']) * self.n_repeat // self.batch_size
 
     def __getitem__(self, item):
         if isinstance(item, slice):
-            return [self.__get_single_item(i) for i in range(*item.indices(len(self)))]
+            return np.array([self.__get_single_item(i) for i in
+                             range(*item.indices(len(self.data_dict['flakes'] * self.n_repeat)))])
 
         return self.__get_single_item(item)
 
     def __get_single_item(self, idx):
-        flake = self.data_dict['flakes'][idx]
+        flake = self.data_dict['flakes'][idx // self.n_repeat]
+        # flake = next((flake for flake in self.data_dict['flakes'] if flake['name'] == 'lianra'), None)
 
-        params = OrderedDict()
+        params = []
         for key, name in self.param_name_dict.items():
             value = flake['params'][key]
             if isinstance(value, (list, tuple)):
                 value = value[0]
-            params[name] = value
+            params.append(float(value))
+        #     print(f"{name}: {value}")
+        # print(f"name: {flake['name']}")
 
-        return params
+        return np.array(params)
 
     def __iter__(self):
-        for i in range(0, len(self), self.batch_size):
-            yield self[i: i + self.batch_size]
+        for i in range(0, len(self.data_dict['flakes']) * self.n_repeat, self.batch_size):
+            yield np.array(self[i: i + self.batch_size])
 
 
 class ParamToIdx(Enum):
